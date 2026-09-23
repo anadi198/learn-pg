@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Postgres Lab</title>
+<meta name="description" content="Learn PostgreSQL hands-on with a real Postgres 18 running in your browser: SQL beyond joins, EXPLAIN plans, indexing, transactions and locking, schema design and production skills. 58 auto-checked exercises on a 2.3M-row dataset. Nothing to install.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Postgres Lab — learn PostgreSQL by running it">
+<meta property="og:description" content="A real Postgres 18 in your browser, 34 lessons and 58 auto-checked exercises: query plans, indexing, locking, schema design and more. Free, nothing to install.">
+<meta property="og:url" content="https://anadi198.github.io/learn-pg/">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#EEF1F4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0D1217" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23245A8D'/%3E%3Cg fill='none' stroke='white' stroke-width='4.5'%3E%3Cellipse cx='32' cy='19' rx='16' ry='6'/%3E%3Cpath d='M16 19v26c0 3.3 7.2 6 16 6s16-2.7 16-6V19'/%3E%3Cpath d='M16 32c0 3.3 7.2 6 16 6s16-2.7 16-6'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app" id="app" data-tab="lesson">
+  <header class="topbar">
+    <button class="btn quiet icon-btn" id="navToggle" aria-label="Show or hide the lesson list" title="Show or hide the lesson list">☰</button>
+    <div class="brand"><b>Postgres<span>Lab</span></b><small>learn PostgreSQL by running it</small></div>
+    <div class="spacer"></div>
+    <div class="dbchip" id="dbchip" title="Database status"><i class="dot busy" id="dbdot"></i><span id="dbtext">Starting Postgres…</span></div>
+    <button class="btn" id="saveBtn" title="Save the current database (including your tables and indexes) to this browser" disabled>Save snapshot</button>
+    <button class="btn quiet" id="resetBtn" title="Restore or rebuild the database">Reset ▾</button>
+    <button class="btn quiet icon-btn" id="themeBtn" title="Toggle light/dark" aria-label="Toggle light or dark theme">◐</button>
+  </header>
+
+  <nav class="nav" id="nav" aria-label="Lessons"></nav>
+
+  <div class="tabs" role="tablist">
+    <button id="tabLesson" class="on" role="tab">Lesson</button>
+    <button id="tabConsole" role="tab">Console</button>
+  </div>
+
+  <main class="lesson-pane" id="lessonPane"><article class="reader" id="reader"></article></main>
+
+  <div class="split" id="split" role="separator" aria-orientation="vertical" aria-label="Resize console"></div>
+
+  <section class="console" id="console" aria-label="SQL console">
+    <div class="con-head">
+      <div class="engine-sw" id="engineSw" role="group" aria-label="Where your SQL runs"><button data-e="browser" title="PostgreSQL compiled to WebAssembly, running inside this tab. Works anywhere, including phones.">In-browser</button><button data-e="local" title="Your own PostgreSQL on this computer, through the bridge. Real concurrent sessions.">Your Postgres</button></div>
+      <span class="title" id="pgver">PostgreSQL 18</span>
+      <span class="spacer"></span>
+      <span class="runstate" id="runstate" hidden></span>
+      <button class="tbtn stop" id="stopBtn" hidden title="Stops the query by restarting the engine from your last snapshot">Stop</button>
+      <button class="tbtn" id="helpBtn" title="psql commands">\?</button>
+      <button class="tbtn" id="clearBtn" title="Clear the transcript">Clear</button>
+    </div>
+    <div class="transcript" id="transcript" aria-live="polite"></div>
+    <div class="vsplit" id="vsplit" role="separator" aria-orientation="horizontal" aria-label="Resize editor"></div>
+    <div class="editor-wrap" id="editorWrap"><span class="prompt-lbl" id="promptLbl">postgres=#</span></div>
+    <div class="con-foot">
+      <span class="sessbar" id="sessBar" hidden aria-label="Sessions"></span>
+      <button class="tbtn go" id="runBtn" disabled>Run <span style="opacity:.7">⌘/Ctrl ↵</span></button>
+      <button class="tbtn" id="explainBtn" disabled title="Runs EXPLAIN ANALYZE on the statement under the cursor (plain EXPLAIN for writes)">Explain ▸</button>
+      <span class="hint">Ctrl ↑/↓ history · Ctrl Space complete · <code>\d orders</code></span>
+    </div>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/sql-hint.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="seed.js"></script>
+<script src="course.js"></script>
+<script src="course2.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

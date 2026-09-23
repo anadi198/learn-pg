@@ -1,0 +1,18 @@
+{
+  "name": "pglab-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Connects the Postgres Lab web app to your own local PostgreSQL",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "pgpass": "^1.0.5"
+  }
+}
