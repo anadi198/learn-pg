@@ -620,7 +620,7 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY daily_revenue;` },
 <p>A rough guide: consider it for time-series or log tables with a retention policy, or for tables heading past roughly 100 GB with a natural key almost every query filters on. It isn’t the answer to “my 5 GB table is slow” — that’s an index or a query problem.</p>
 ${S(`-- pruning in action (after you build events_p in the exercise)
 EXPLAIN SELECT count(*) FROM events_p
-WHERE occurred_at >= '2026-03-10' AND occurred_at < '2026-03-11';`, { label: 'Try after the exercise' })}
+WHERE occurred_at >= '2026-03-10' AND occurred_at < '2026-03-11';`, { label: 'Try after the exercise', noexample: true })}
 ${INTERVIEW(`<p>“When would you partition?” → retention on time-series, very large tables with a dominant filter key, and hash partitioning for multi-tenant spread. “Partitioning vs sharding?” → partitions live in one server; sharding spreads them across servers (Citus, or application-level), which adds cross-shard queries, distributed transactions and rebalancing.</p>`)}
 `,
   exercises: [

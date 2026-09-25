@@ -217,6 +217,28 @@ class LocalSess extends Sess {
   async cancel() { if (this.id) await Bridge.req('/api/cancel', { id: this.id }); }
   async close() { if (this.id) { const id = this.id; this.id = null; this.pid = null; await Bridge.req('/api/close', { id }); } this.intx = this.aborted = false; }
 }
+// Example outputs under lesson snippets: RecordSess captures every exec() a snippet makes (including the
+// catalog queries behind \\d), ReplaySess feeds them back, so examples render through the real renderers.
+class RecordSess extends Sess {
+  constructor(inner) { super(''); this.inner = inner; this.log = []; }
+  async exec(sql, maxRows) { const r = await this.inner.exec(sql, maxRows); this.log.push(storable(r)); return r; }
+  track(stmt, r) { this.inner.track(stmt, r); }
+}
+class ReplaySess extends Sess {
+  constructor(log) { super(''); this.log = log || []; this.i = 0; }
+  exec() { return Promise.resolve(this.log[this.i++] || { ok: false, error: { message: 'No recorded output for this statement. Press Run to execute it.' } }); }
+  track() {}
+}
+function storable(r) {
+  const o = { ok: r.ok, ms: Math.round((r.ms || 0) * 100) / 100 };
+  if (r.notices && r.notices.length) o.notices = r.notices;
+  if (!r.ok) o.error = r.error;
+  if (r.results) o.results = r.results.map((x) => ({ fields: x.fields, command: x.command, rowCount: x.rowCount, total: x.total,
+    rows: x.fields.length === 1 && x.fields[0].name === 'QUERY PLAN' ? x.rows : x.rows.slice(0, 25) }));
+  return o;
+}
+const OUTPUTS = window.PGLAB_OUTPUTS || { snippets: {}, types: {} };
+const BUILD = new URLSearchParams(location.search).has('build-outputs');
 const BS = new BrowserSess('');
 const L = { A: new LocalSess('A'), B: new LocalSess('B'), C: new LocalSess('C'), G: new LocalSess('grader'), M: new LocalSess('monitor') };
 const USER_SESSIONS = ['A', 'B', 'C'];
@@ -229,6 +251,7 @@ const sessOf = (pid) => [...USER_SESSIONS, 'G', 'M'].find((k) => L[k].pid && Str
 
 /* ─────────────────────────── App state ─────────────────────────── */
 const S = {
+  // (types is filled from outputs.js below, then from the live catalog)
   engine: store.get('engine', 'browser'), curSess: 'A', bReady: false, bBooted: false,
   seeding: false, dirty: false, savedAt: null, scale: store.get('scale', 1),
   expanded: store.get('expanded', 'off'), timing: store.get('timing', true),
@@ -236,6 +259,7 @@ const S = {
   history: store.get('history', []), hIdx: -1,
   done: store.get('done', {}), visited: store.get('visited', {}), lesson: null, saving: false,
 };
+Object.assign(S.types, OUTPUTS.types || {});
 const el = {
   app: $('#app'), nav: $('#nav'), reader: $('#reader'), pane: $('#lessonPane'), tr: $('#transcript'),
   run: $('#runBtn'), explain: $('#explainBtn'), stop: $('#stopBtn'), runstate: $('#runstate'),
@@ -300,7 +324,8 @@ function toast(msg, ms = 2600) {
 function splitSql(src) {
   const out = []; const n = src.length; let i = 0, start = 0;
   const onlyTrivia = (s) => s.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim() === '';
-  const push = (a, b) => { const text = src.slice(a, b); if (!onlyTrivia(text)) out.push({ kind: 'sql', text: text.trim(), start: a, end: b }); };
+  // terminated = ended by a top-level ';' (not inside a string, identifier, comment or $$ body)
+  const push = (a, b, terminated = false) => { const text = src.slice(a, b); if (!onlyTrivia(text)) out.push({ kind: 'sql', text: text.trim(), start: a, end: b, terminated }); };
   while (i < n) {
     const c = src[i], c2 = src[i + 1];
     if (c === '\\' && onlyTrivia(src.slice(start, i))) {
@@ -325,7 +350,7 @@ function splitSql(src) {
       const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(src.slice(i, i + 64));
       if (m) { const j = src.indexOf(m[0], i + m[0].length); i = j < 0 ? n : j + m[0].length; continue; }
     }
-    if (c === ';') { push(start, i + 1); i++; start = i; continue; }
+    if (c === ';') { push(start, i + 1, true); i++; start = i; continue; }
     i++;
   }
   push(start, n);
@@ -373,14 +398,20 @@ const Editor = {
   setHeight(h) { editorWrap.style.setProperty('--editor-h', h + 'px'); if (cm) cm.setSize(null, h); },
 };
 function initEditor() {
-  const initial = store.get('draft', null) ?? [
-    '-- Welcome! This is a real PostgreSQL 18 running inside your browser tab.',
-    '-- Press Ctrl+Enter (⌘+Enter on Mac) to run everything in this box.',
-    '\\dt+',
-    'SELECT status, count(*) FROM orders GROUP BY status ORDER BY 2 DESC;',
-  ].join('\n');
+  const initial = store.get('draft', null) ?? 'SELECT status, count(*) FROM orders GROUP BY status ORDER BY 2 DESC;';
   const keys = {
+    // psql-style: Enter sends a finished statement (ends with ; or is a \command) when the cursor is at the end
+    Enter: (c) => {
+      const text = c.getValue();
+      const atEnd = c.indexFromPos(c.getCursor()) >= text.replace(/\s+$/, '').length;
+      if (atEnd && !c.somethingSelected() && readyToRun(text)) { runEditor(); return undefined; }
+      return window.CodeMirror.Pass;
+    },
+    'Shift-Enter': 'newlineAndIndent',
     'Ctrl-Enter': () => runEditor(), 'Cmd-Enter': () => runEditor(), 'Shift-Ctrl-Enter': () => explainAtCursor(), 'Shift-Cmd-Enter': () => explainAtCursor(),
+    // ↑ on the first line / ↓ on the last line walk the history, like a shell
+    Up: (c) => { if (c.getCursor().line === 0 && !c.somethingSelected()) { histMove(-1); return undefined; } return window.CodeMirror.Pass; },
+    Down: (c) => { if (c.getCursor().line === c.lastLine() && !c.somethingSelected()) { histMove(1); return undefined; } return window.CodeMirror.Pass; },
     'Ctrl-Space': 'autocomplete', 'Ctrl-Up': () => histMove(-1), 'Ctrl-Down': () => histMove(1), 'Cmd-Up': () => histMove(-1), 'Cmd-Down': () => histMove(1),
     Tab: (c) => c.replaceSelection('  '),
   };
@@ -389,19 +420,29 @@ function initEditor() {
       value: initial, mode: 'text/x-pgsql', lineWrapping: true, matchBrackets: true, indentUnit: 2, tabSize: 2,
       extraKeys: keys, hintOptions: { tables: {}, completeSingle: false }, spellcheck: false, autocorrect: false,
     });
+    cm.setCursor(cm.lineCount(), 0);
     cm.on('change', debounce(() => store.set('draft', cm.getValue()), 400));
     cm.on('inputRead', (c, ch) => { if (ch.text[0] === '.' && c.showHint) c.showHint({ completeSingle: false }); });
   } else {
     fallback = document.createElement('textarea'); fallback.className = 'fallback'; fallback.value = initial; fallback.spellcheck = false;
     fallback.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.shiftKey ? explainAtCursor() : runEditor(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowUp') { e.preventDefault(); histMove(-1); }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowDown') { e.preventDefault(); histMove(1); }
+      const v = fallback.value, pos = fallback.selectionStart, sel = fallback.selectionEnd !== pos;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.shiftKey ? explainAtCursor() : runEditor(); return; }
+      if (e.key === 'Enter' && !e.shiftKey && !sel && pos >= v.replace(/\s+$/, '').length && readyToRun(v)) { e.preventDefault(); runEditor(); return; }
+      if (e.key === 'ArrowUp' && !sel && !v.slice(0, pos).includes('\n')) { e.preventDefault(); histMove(-1); }
+      if (e.key === 'ArrowDown' && !sel && !v.slice(pos).includes('\n')) { e.preventDefault(); histMove(1); }
     });
     fallback.addEventListener('input', debounce(() => store.set('draft', fallback.value), 400));
     editorWrap.appendChild(fallback);
   }
   Editor.setHeight(store.get('editorH', 160));
+}
+// A buffer is ready to send when its last statement is closed by a top-level ';' or it ends in a \command.
+function readyToRun(text) {
+  const items = splitSql(text);
+  if (!items.length) return false;
+  const last = items[items.length - 1];
+  return last.kind === 'meta' || last.terminated;
 }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function histPush(text) {
@@ -410,10 +451,13 @@ function histPush(text) {
   if (S.history.length > 150) S.history = S.history.slice(-150);
   S.hIdx = -1; store.set('history', S.history);
 }
+// ↑ goes back through history; ↓ past the newest entry restores whatever you were typing.
 function histMove(d) {
   if (!S.history.length) return;
-  if (S.hIdx === -1) S.hIdx = S.history.length;
-  S.hIdx = Math.max(0, Math.min(S.history.length - 1, S.hIdx + d));
+  if (S.hIdx === -1) { if (d > 0) return; S.histDraft = Editor.get(); S.hIdx = S.history.length; }
+  const next = S.hIdx + d;
+  if (next >= S.history.length) { S.hIdx = -1; Editor.set(S.histDraft || ''); return; }
+  S.hIdx = Math.max(0, next);
   Editor.set(S.history[S.hIdx]);
 }
 async function refreshHints() {
@@ -623,7 +667,7 @@ function watchWait(sess, o) {
   return () => { stop = true; clearTimeout(timer); if (lineEl) lineEl.remove(); };
 }
 
-async function runStatement(stmt, o, { quiet = false, sess = cur() } = {}) {
+async function runStatement(stmt, o, { quiet = false, sess = cur(), sideEffects = true } = {}) {
   if (/pg_stat(?!_statements)|pg_statio/i.test(stmt)) await sess.exec('SELECT pg_stat_force_next_flush()');
   const unwatch = quiet ? () => {} : watchWait(sess, o);
   const r = await sess.exec(stmt, 500);
@@ -637,11 +681,25 @@ async function runStatement(stmt, o, { quiet = false, sess = cur() } = {}) {
       if (S.timing) line(o, `Time: ${fmtMs(r.ms)} ms`, 'time');
     } else renderError(o, r.error, stmt);
   }
+  if (!sideEffects) return r;
   if (r.ok && !isReadOnly(stmt) && !isLocal()) { S.dirty = true; setStatus(); }
   if (r.ok && /^\s*(create|alter|drop)\b/i.test(stripComments(stmt))) refreshHints();
   setPrompt(); renderSessionBar();
   return r;
 }
+// Runs a lesson snippet into a container, psql -f style: each statement's output in order,
+// with a one-line echo of the statement when there are several.
+async function runInline(code, o, sess, { sideEffects = true } = {}) {
+  const items = splitSql(code);
+  const multi = items.length > 1;
+  for (const it of items) {
+    if (multi) line(o, esc('› ' + oneLine(it.text)), 'echo');
+    if (it.kind === 'meta') { await runMeta(it.text, o, sess); continue; }
+    const r = await runStatement(it.text, o, { sess, sideEffects });
+    if (r.killed || r.offline) break;
+  }
+}
+const oneLine = (t) => { const f = stripComments(t).replace(/\s+/g, ' ').trim(); return f.length > 96 ? f.slice(0, 94) + '…' : f; };
 async function runSql(text, { echo = true, sess = cur() } = {}) {
   if (!isReady()) { toast(isLocal() ? 'Your Postgres is not connected yet — see the console.' : 'Postgres is still starting — one moment.'); return []; }
   if (sess.busy) { toast(isLocal() ? `Session ${sess.label} is still running a statement (waiting for a lock?). Switch to another session, or press Stop.` : 'Still running the previous statement.'); return []; }
@@ -661,13 +719,25 @@ async function runSql(text, { echo = true, sess = cur() } = {}) {
   } finally { sess.busy = false; renderSessionBar(); }
   return outs;
 }
+// Runs the editor like a terminal: the command moves into the transcript + history and the editor clears.
+// (Running a selection leaves the buffer alone.)
 function runEditor() {
   const sel = Editor.selection();
   goConsole();
-  return runSql(sel && sel.trim() ? sel : Editor.get());
+  if (sel && sel.trim()) return runSql(sel);
+  const text = Editor.get();
+  if (!text.trim()) return undefined;
+  const sess = cur();
+  if (!isReady() || sess.busy) return runSql(text, { sess });   // only explains why it can't run; keeps your text
+  sess.lastSql = text;
+  S.hIdx = -1; S.histDraft = '';
+  Editor.set('');
+  return runSql(text, { sess });
 }
+// What "Check" and "Explain" act on: the editor if it has something, else the last thing you ran.
+const workingSql = () => (Editor.get().trim() ? Editor.get() : cur().lastSql || '');
 function explainAtCursor() {
-  const text = Editor.get(); const cur = Editor.cursor();
+  const text = workingSql(); const cur = Editor.get().trim() ? Editor.cursor() : text.length;
   const items = splitSql(text).filter((x) => x.kind === 'sql');
   if (!items.length) { toast('Write a query first.'); return; }
   const it = items.find((x) => cur >= x.start && cur <= x.end + 1) || items[items.length - 1];
@@ -850,7 +920,7 @@ async function describe(o, name, plus, sess) {
 function banner() {
   el.tr.innerHTML = '';
   const e = document.createElement('div'); e.className = 'entry';
-  e.innerHTML = `<div class="out"><div class="dim">psql (PostgreSQL 18 via PGlite, running in this tab)\nType <span class="good">\\?</span> for help. Everything you run here is real Postgres.</div></div>`;
+  e.innerHTML = `<div class="out"><div class="dim">psql (PostgreSQL 18 via PGlite, running in this tab)\nType SQL and press <span class="good">Enter</span> to run it (end statements with ;, Shift+Enter for a new line). <span class="good">↑/↓</span> recall history, <span class="good">\\?</span> lists psql commands.</div></div>`;
   e.firstChild.firstChild.style.whiteSpace = 'pre-wrap';
   el.tr.appendChild(e);
 }
@@ -907,7 +977,7 @@ async function seed(scale) {
   sb.finish(`Built the "shop" dataset in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   S.savedAt = null; S.dirty = false;
   await afterReady();
-  saveSnapshot({ auto: true });
+  if (!BUILD) saveSnapshot({ auto: true });
 }
 async function loadTypes(sess) {
   const t = await sess.exec(`SELECT oid, format_type(oid, NULL) FROM pg_type`, 20000);
@@ -1237,20 +1307,99 @@ function hl(code) {
   }
   return out;
 }
+// Stable id for a snippet's code, used to find its recorded output.
+function snippetKey(code) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < code.length; i++) { h ^= code.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36) + '-' + code.length.toString(36);
+}
+const codeOf = (pre) => pre.textContent.replace(/^\n+|\s+$/g, '');
+const LESSON_EDITORS = new Set();
+let replayChain = Promise.resolve();   // replays run one at a time (\\x on/off inside a snippet is global state)
+function copyText(text) {
+  const ok = () => toast('Copied');
+  const no = () => toast('Copy blocked — select the text instead');
+  navigator.clipboard ? navigator.clipboard.writeText(text).then(ok, no) : no();
+}
 function enhanceCode(root) {
+  LESSON_EDITORS.clear();
   $$('pre.sql', root).forEach((pre) => {
-    const code = pre.textContent.replace(/^\n+|\s+$/g, '');
-    const box = document.createElement('div'); box.className = 'codeblock';
+    const code = codeOf(pre);
     const norun = pre.hasAttribute('data-norun');
-    box.innerHTML = `<pre>${hl(code)}</pre><div class="cb-bar"><span class="lbl">${esc(pre.dataset.label || (norun ? 'SQL (read only)' : 'SQL'))}</span>
-      <button class="btn quiet" data-a="copy">Copy</button><button class="btn" data-a="edit">Edit in console</button>${norun ? '' : '<button class="btn primary" data-a="run">Run ▸</button>'}</div>`;
-    box.addEventListener('click', (e) => {
-      const b = e.target.closest('button'); if (!b) return;
-      if (b.dataset.a === 'run') { Editor.set(code); goConsole(); runSql(code); }
-      if (b.dataset.a === 'edit') { Editor.set(code); goConsole(); Editor.focus(); }
-      if (b.dataset.a === 'copy') { const ok = () => toast('Copied'); navigator.clipboard ? navigator.clipboard.writeText(code).then(ok, () => toast('Copy blocked — select the text instead')) : toast('Copy blocked — select the text instead'); }
-    });
+    const box = document.createElement('div');
+    if (norun) {
+      box.className = 'codeblock';
+      box.innerHTML = `<pre>${hl(code)}</pre><div class="cb-bar"><span class="lbl">${esc(pre.dataset.label || 'SQL (read only)')}</span>
+        <button class="btn quiet" data-a="copy">Copy</button></div>`;
+      box.addEventListener('click', (e) => { if (e.target.closest('[data-a=copy]')) copyText(code); });
+      pre.replaceWith(box);
+      return;
+    }
+    const rec = pre.hasAttribute('data-noexample') ? null : OUTPUTS.snippets[snippetKey(code)] || null;
+    box.className = 'codeblock live';
+    box.innerHTML = `<div class="cb-code"></div>
+      <div class="cb-bar"><span class="lbl">${esc(pre.dataset.label || 'SQL')} · editable</span>
+        <button class="btn quiet" data-a="reset" hidden title="Put back the original example and its output">↺ Reset</button>
+        <button class="btn quiet" data-a="copy">Copy</button>
+        <button class="btn quiet" data-a="edit" title="Load this into the console">To console</button>
+        <button class="btn primary" data-a="run" title="Run it here (Ctrl+Enter)">Run ▸</button></div>
+      <div class="cb-out"><div class="cb-out-h"><span class="tag"></span></div><div class="out"></div></div>`;
     pre.replaceWith(box);
+    const codeEl = $('.cb-code', box), out = $('.cb-out .out', box), tag = $('.cb-out .tag', box), resetBtn = $('[data-a=reset]', box);
+    let applying = false, running = false;
+    const onChange = () => {
+      if (applying) return;
+      const edited = ed.get() !== code;
+      resetBtn.hidden = !edited;
+      if (edited && !running) setTag('edited', 'Edited · press Run (Ctrl+Enter) to see your output');
+    };
+    let ed;
+    if (window.CodeMirror) {
+      const c = window.CodeMirror(codeEl, {
+        value: code, mode: 'text/x-pgsql', lineWrapping: true, matchBrackets: true, indentUnit: 2, tabSize: 2,
+        viewportMargin: Infinity, spellcheck: false,
+        extraKeys: { 'Ctrl-Enter': () => run(), 'Cmd-Enter': () => run(), Tab: (cc) => cc.replaceSelection('  ') },
+      });
+      c.on('change', onChange);
+      ed = { get: () => c.getValue(), set: (v) => c.setValue(v), refresh: () => c.refresh() };
+    } else {
+      const ta = document.createElement('textarea'); ta.className = 'cb-ta'; ta.value = code; ta.spellcheck = false;
+      const fit = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+      ta.addEventListener('input', () => { fit(); onChange(); });
+      ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } });
+      codeEl.appendChild(ta); setTimeout(fit, 0);
+      ed = { get: () => ta.value, set: (v) => { ta.value = v; fit(); }, refresh: fit };
+    }
+    LESSON_EDITORS.add(ed);
+    function setTag(kind, text) { tag.className = 'tag ' + kind; tag.textContent = text; }
+    function showExample() {
+      out.innerHTML = '';
+      if (!rec) { setTag('dim', pre.hasAttribute('data-noexample') ? 'Press Run to see the output (after you’ve done the exercise)' : 'Press Run to see the output'); return; }
+      setTag('example', 'Example output');
+      const target = out;
+      replayChain = replayChain.then(() => runInline(code, target, new ReplaySess(rec), { sideEffects: false })).catch(() => {});
+    }
+    async function run() {
+      const sql = ed.get(); if (!sql.trim()) return;
+      if (!isReady()) { toast(isLocal() ? 'Your Postgres is not connected yet — see the console.' : 'Postgres is still starting — one moment.'); return; }
+      const sess = cur();
+      if (sess.busy) { toast(isLocal() ? `Session ${sess.label} is busy. Switch session in the console, or press Stop.` : 'Still running the previous statement.'); return; }
+      running = true; out.innerHTML = ''; setTag('run', 'Running…');
+      sess.busy = true; sess.t0 = performance.now(); renderSessionBar();
+      const t0 = performance.now();
+      try { await runInline(sql, out, sess); } finally { sess.busy = false; running = false; renderSessionBar(); }
+      histPush(sql);
+      setTag('mine', `Your output · ${isLocal() ? 'your Postgres, session ' + sess.label : 'in-browser engine'} · ${fmtMs(performance.now() - t0)} ms`);
+    }
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-a]'); if (!b) return;
+      const a = b.dataset.a;
+      if (a === 'run') run();
+      if (a === 'copy') copyText(ed.get());
+      if (a === 'edit') { Editor.set(ed.get()); goConsole(); Editor.focus(); }
+      if (a === 'reset') { applying = true; ed.set(code); applying = false; resetBtn.hidden = true; showExample(); }
+    });
+    showExample();
   });
 }
 function markDone(id) {
@@ -1470,7 +1619,7 @@ function wireExercise(box, x) {
     } else if (a === 'check') {
       if (!isReady()) { toast(isLocal() ? 'Your Postgres is not connected yet — see the console.' : 'Postgres is still starting.'); return; }
       b.disabled = true; show('info', 'Checking…');
-      const res = await grade(x, Editor.get());
+      const res = await grade(x, workingSql());
       b.disabled = false;
       if (res.ok) {
         show('ok', '✓ ' + res.msg + (x.after ? `<div style="margin-top:6px;color:var(--ink-2)">${x.after}</div>` : ''));
@@ -1497,7 +1646,7 @@ function renderLesson(id) {
     <h1>${esc(l.title)}</h1>
     ${l.lede ? `<p class="lede">${l.lede}</p>` : ''}
     ${l.mod.localBest ? '<div class="callout engine" data-engine-callout></div>' : ''}
-    <div class="prose">${l.body}${exs.length ? `<h2 class="practice-h">Practice</h2><p>Write your answer in the console (right), then press <b>Check</b>. The checker compares against the live database, so it works even after you add indexes or change data.</p>` : ''}</div>
+    <div class="prose">${l.body}${exs.length ? `<h2 class="practice-h">Practice</h2><p>Write your answer in the console, run it, then press <b>Check</b>. Check uses what's in the editor, or your last run if the editor is empty. It compares against the live database, so it works even after you add indexes or change data.</p>` : ''}</div>
     <div class="exs">${exs.map(exerciseHtml).join('')}</div>
     <nav class="lesson-nav">${prev ? `<a href="#${prev.id}"><small>← Previous</small><span>${esc(prev.title)}</span></a>` : ''}${next ? `<a class="next" href="#${next.id}"><small>Next →</small><span>${esc(next.title)}</span></a>` : ''}</nav>`;
   enhanceCode(el.reader);
@@ -1527,7 +1676,7 @@ async function updateLiveCounts() {
 /* ─────────────────────────── Layout & chrome ─────────────────────────── */
 const narrow = () => window.matchMedia('(max-width: 920px)').matches;
 function goConsole() { if (narrow()) { el.app.dataset.tab = 'console'; $('#tabConsole').classList.add('on'); $('#tabLesson').classList.remove('on'); setTimeout(() => Editor.refresh(), 0); } }
-function goLesson() { if (narrow()) { el.app.dataset.tab = 'lesson'; $('#tabLesson').classList.add('on'); $('#tabConsole').classList.remove('on'); } }
+function goLesson() { if (narrow()) { el.app.dataset.tab = 'lesson'; $('#tabLesson').classList.add('on'); $('#tabConsole').classList.remove('on'); setTimeout(() => LESSON_EDITORS.forEach((e) => e.refresh()), 0); } }
 function initChrome() {
   $('#tabLesson').onclick = goLesson; $('#tabConsole').onclick = goConsole;
   if (store.get('navHidden', false)) el.app.classList.add('nav-hidden');
@@ -1667,6 +1816,35 @@ window.pglabSelfTest = async ({ only = null, from = null } = {}) => {
   window.__selftest = report;
   return report;
 };
+// Used by tools/build-outputs.mjs (headless Chrome, fresh profile → freshly generated dataset).
+async function buildOutputs() {
+  const OUT = { v: 1, built: new Date().toISOString(), engine: 'PGlite ' + S.info.browser.version, types: {}, snippets: {} };
+  const oids = new Set();
+  for (const l of ALL) {
+    const doc = new DOMParser().parseFromString('<div>' + l.body + '</div>', 'text/html');
+    for (const pre of doc.querySelectorAll('pre.sql')) {
+      if (pre.hasAttribute('data-norun') || pre.hasAttribute('data-noexample')) continue;
+      const code = codeOf(pre); const key = snippetKey(code);
+      if (OUT.snippets[key]) continue;
+      const rec = new RecordSess(BS);
+      await runInline(code, document.createElement('div'), rec);
+      OUT.snippets[key] = rec.log;
+      rec.log.forEach((r) => (r.results || []).forEach((res) => res.fields.forEach((f) => oids.add(f.type))));
+      console.log('PGLAB-BUILD ' + l.id + ' ' + key + (rec.log.some((r) => !r.ok) ? ' (has an error — check it is intended)' : ''));
+    }
+  }
+  if (BS.intx) console.log('PGLAB-BUILD warning: a snippet left a transaction open');
+  for (const o of oids) if (S.types[o]) OUT.types[o] = S.types[o];
+  return OUT;
+}
+async function buildOutputsWhenReady() {
+  await new Promise((r) => { const t = setInterval(() => { if (S.bReady) { clearInterval(t); r(); } }, 300); });
+  try {
+    const out = await buildOutputs();
+    const res = await fetch('/__outputs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(out) });
+    console.log('PGLAB-BUILD done ' + res.status + ' ' + Object.keys(out.snippets).length + ' snippets');
+  } catch (e) { console.log('PGLAB-BUILD failed ' + e.message); }
+}
 window.pglab = { Engine, S, L, BS, Bridge, runSql, grade, EX, restartEngine, setEngine, switchSession, connectLocal };
 
 /* ─────────────────────────── Go ─────────────────────────── */
@@ -1674,5 +1852,6 @@ if (takePairHash()) { S.engine = 'local'; store.set('engine', 'local'); }
 initChrome(); initEditor(); banner(); setStatus(); setPrompt();
 const startId = location.hash.slice(1) || store.get('lesson', ALL[0].id);
 renderLesson(ALL.some((l) => l.id === startId) ? startId : ALL[0].id);
-if (isLocal()) connectLocal().then(() => refreshEngineCallouts()); else boot();
+if (BUILD) { S.engine = 'browser'; boot(); buildOutputsWhenReady(); }
+else if (isLocal()) connectLocal().then(() => refreshEngineCallouts()); else boot();
 })();

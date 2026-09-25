@@ -48,10 +48,13 @@ ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
 |---|---|
 | `index.html`, `styles.css`, `app.js` | The app: psql-style console (`\d`, `\dt+`, `\x`…), plan visualizer, grader, engine switch |
 | `course.js`, `course2.js` | Lessons, exercises, quizzes, concurrency scenarios |
+| `outputs.js` | Recorded example output shown under every lesson snippet (generated, see below) |
 | `seed.js` / `seed.sql` | The dataset generator (in-browser / plain psql: `psql -v ON_ERROR_STOP=1 -f seed.sql`) |
+| `tools/build-outputs.mjs` | Regenerates `outputs.js` |
 | `bridge/` | The local helper for "Your Postgres" |
 | `serve.mjs` | Optional static server (`node serve.mjs` → http://localhost:8765) |
 
 ## Development
 
-Open the browser console on the lab and run `await pglabSelfTest()`. It runs every exercise's reference solution (plus known-wrong and alternative answers) through the grader, on whichever engine is selected.
+- **Snippet outputs:** every SQL block in a lesson shows its output inline. These come from `outputs.js`, recorded by running the whole course in order on a freshly generated dataset. After adding or changing a snippet, run `node tools/build-outputs.mjs` (it needs Chrome or Edge; set `CHROME=/path/to/chrome` if it isn't found). A snippet with no recording shows "Press Run" instead. Mark a snippet `noexample` in the course files if it depends on work the reader does in an exercise.
+- **Exercises:** open the browser console on the lab and run `await pglabSelfTest()`. It runs every exercise's reference solution (plus known-wrong and alternative answers) through the grader, on whichever engine is selected.

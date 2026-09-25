@@ -3,7 +3,7 @@
 'use strict';
 const escH = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const quizzes = {}; const sims = {};
-const S = (sql, o = {}) => `<pre class="sql"${o.norun ? ' data-norun' : ''}${o.label ? ` data-label="${o.label}"` : ''}>${escH(sql.trim())}</pre>`;
+const S = (sql, o = {}) => `<pre class="sql"${o.norun ? ' data-norun' : ''}${o.noexample ? ' data-noexample' : ''}${o.label ? ` data-label="${o.label}"` : ''}>${escH(sql.trim())}</pre>`;
 const QUIZ = (id, q, options, answer, why) => { quizzes[id] = { id, q, options, answer, why }; return `<div class="quiz" data-quiz="${id}"></div>`; };
 const SIM = (...ids) => `<div class="sim" data-sim="${ids.join(',')}"></div>`;
 const CALL = (kind, title, html) => `<div class="callout ${kind}"><b>${title}</b>${html}</div>`;
@@ -57,7 +57,7 @@ ${TABLE(['Round', 'Typical ask', 'What a strong answer sounds like'], [
 <h2>How to use this lab</h2>
 <ul>
   <li><strong>The console on the right is a real PostgreSQL 18</strong>, compiled to WebAssembly and running in this tab. Nothing is simulated except where a lesson says so.</li>
-  <li>Every SQL block has <b>Run ▸</b>. Edit freely — you can’t break anything that <b>Reset ▾</b> can’t fix.</li>
+  <li>Every SQL block shows its output right under it. The code is editable: change it and press <b>Run ▸</b> (or Ctrl+Enter) to see your version’s output, and <b>↺ Reset</b> to go back. You can’t break anything that <b>Reset ▾</b> at the top can’t fix.</li>
   <li>Exercises are checked against the live database, so your answer must actually work, not match a string.</li>
   <li>Press <b>Save snapshot</b> to keep the tables and indexes you create across reloads.</li>
 </ul>

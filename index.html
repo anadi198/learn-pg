@@ -58,9 +58,9 @@
     <div class="editor-wrap" id="editorWrap"><span class="prompt-lbl" id="promptLbl">postgres=#</span></div>
     <div class="con-foot">
       <span class="sessbar" id="sessBar" hidden aria-label="Sessions"></span>
-      <button class="tbtn go" id="runBtn" disabled>Run <span style="opacity:.7">⌘/Ctrl ↵</span></button>
+      <button class="tbtn go" id="runBtn" disabled>Run <span style="opacity:.7">↵</span></button>
       <button class="tbtn" id="explainBtn" disabled title="Runs EXPLAIN ANALYZE on the statement under the cursor (plain EXPLAIN for writes)">Explain ▸</button>
-      <span class="hint">Ctrl ↑/↓ history · Ctrl Space complete · <code>\d orders</code></span>
+      <span class="hint">Enter runs · Shift+Enter new line · ↑↓ history · Ctrl+Space complete</span>
     </div>
   </section>
 </div>
@@ -71,6 +71,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/sql-hint.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
 <script src="seed.js"></script>
+<script src="outputs.js"></script>
 <script src="course.js"></script>
 <script src="course2.js"></script>
 <script src="app.js"></script>
