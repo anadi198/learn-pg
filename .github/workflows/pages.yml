@@ -1,6 +1,4 @@
-# Deploys the lab to GitHub Pages. The Firebase web config for cloud sync is never committed: it lives
-# in the LAB_FIREBASE repository secret (Settings → Secrets and variables → Actions) and is written into
-# sync-config.js only inside this build. Without the secret the site deploys with sync switched off.
+# Deploys the redirect from the old address to the lab's new home.
 name: Deploy to GitHub Pages
 
 on:
@@ -24,37 +22,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # Accepts the config as JSON or pasted straight from the Firebase console
-      # ("const firebaseConfig = { apiKey: ... };"). Error messages never echo the secret.
-      - name: Write the sync config from the repository secret
-        env:
-          LAB_FIREBASE: ${{ secrets.LAB_FIREBASE }}
-        run: |
-          node -e '
-            const raw = (process.env.LAB_FIREBASE || "").trim();
-            if (!raw) { console.log("::warning::LAB_FIREBASE is not set: deploying with cloud sync off"); process.exit(0); }
-            const body = raw.replace(/^(?:const|let|var)\s+\w+\s*=\s*/, "").replace(/;\s*$/, "");
-            let c;
-            try { c = Function("\"use strict\"; return (" + body + ");")(); } catch { c = null; }
-            if (!c || typeof c !== "object" || !c.apiKey || !c.authDomain || !c.projectId) {
-              console.log("::error::LAB_FIREBASE must be the Firebase web config object, with apiKey, authDomain and projectId");
-              process.exit(1);
-            }
-            require("fs").writeFileSync("sync-config.js", "window.LAB_FIREBASE = " + JSON.stringify(c) + ";\n");
-            console.log("sync-config.js written for project " + c.projectId);
-          '
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v6
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: '.'
-
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v5
